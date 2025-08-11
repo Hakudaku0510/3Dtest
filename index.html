@@ -17,6 +17,13 @@
     #controls{position:fixed;right:12px;top:12px;display:flex;gap:8px;z-index:10}
     #startBtn{background:#1f6feb;color:white;border:1px solid #305fa0;border-radius:10px;padding:8px 12px;font-weight:700}
     #resetBtn{background:#2ea043;color:#091b09;border:1px solid #3fb950;border-radius:10px;padding:8px 12px;font-weight:700}
+      /* Mobile controls */
+    #mobileUI{display:none}
+    .touch #mobileUI{display:block}
+    #joy{position:fixed;left:16px;bottom:16px;width:140px;height:140px;border-radius:50%;background:rgba(18,25,51,.6);border:1px solid #28314f;backdrop-filter:blur(4px);touch-action:none;z-index:20}
+    #stick{position:absolute;left:50%;top:50%;width:70px;height:70px;background:rgba(126,231,135,.85);border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 6px 20px rgba(0,0,0,.3)}
+    #lookpad{position:fixed;right:16px;bottom:16px;width:160px;height:160px;border-radius:18px;border:1px dashed #3b4666;background:rgba(18,25,51,.35);backdrop-filter:blur(2px);touch-action:none;z-index:20}
+    #jumpBtn{position:fixed;left:170px;bottom:32px;padding:10px 14px;border-radius:12px;border:1px solid #3fb950;background:#2ea043;color:#091b09;font-weight:700;z-index:20;touch-action:none}
   </style>
 </head>
 <body>
@@ -31,6 +38,12 @@
   </div>
   <div id="hint">W/A/S/D：移動、マウス：視点、スペース：ジャンプ</div>
   <div id="center"><span id="win">🎉 CLEAR! 🎉</span></div>
+  <!-- Mobile UI -->
+  <div id="mobileUI">
+    <div id="joy"><div id="stick"></div></div>
+    <div id="lookpad"></div>
+    <button id="jumpBtn">⤴︎ ジャンプ</button>
+  </div>
   <canvas id="canvas"></canvas>
 
   <!-- Three.js CDN -->
@@ -101,6 +114,10 @@
   let velY = 0;
   let grounded = true;
 
+  // Touch detection
+  const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  if (isTouch) document.body.classList.add('touch');
+
   // Coins
   const COIN_COUNT = 10;
   const coins = [];
@@ -158,6 +175,57 @@
   }
   addEventListener('resize', onResize);
   onResize();
+
+  // ===== Mobile Controls =====
+  let joyActive = false, joyId = null, joyX = 0, joyY = 0;
+  const joy = document.getElementById('joy');
+  const stick = document.getElementById('stick');
+  const lookpad = document.getElementById('lookpad');
+  const jumpBtn = document.getElementById('jumpBtn');
+
+  function setStick(dx, dy){
+    const max = 55; // radius
+    const len = Math.hypot(dx, dy);
+    const cl = len > max ? max/len : 1;
+    const sx = dx*cl, sy = dy*cl;
+    stick.style.transform = `translate(calc(-50% + ${sx}px), calc(-50% + ${sy}px))`;
+    joyX = sx/max;  // -1..1 (right)
+    joyY = -sy/max; // -1..1 (forward)
+  }
+
+  if (isTouch){
+    joy.addEventListener('touchstart', (e)=>{
+      e.preventDefault(); joyActive = true; joyId = e.changedTouches[0].identifier; setStick(0,0);
+    }, {passive:false});
+    joy.addEventListener('touchmove', (e)=>{
+      if (!joyActive) return; e.preventDefault();
+      for (const t of e.changedTouches){ if (t.identifier===joyId){
+        const r = joy.getBoundingClientRect();
+        const dx = t.clientX - (r.left + r.width/2);
+        const dy = t.clientY - (r.top + r.height/2);
+        setStick(dx, dy); break;
+      }}
+    }, {passive:false});
+    const endJoy = (e)=>{ for (const t of e.changedTouches){ if (t.identifier===joyId){ joyActive=false; joyId=null; setStick(0,0);} } };
+    joy.addEventListener('touchend', endJoy);
+    joy.addEventListener('touchcancel', endJoy);
+
+    // Look pad
+    let lookId=null; let lastX=0, lastY=0;
+    lookpad.addEventListener('touchstart', (e)=>{ e.preventDefault(); const t=e.changedTouches[0]; lookId=t.identifier; lastX=t.clientX; lastY=t.clientY; }, {passive:false});
+    lookpad.addEventListener('touchmove', (e)=>{
+      for (const t of e.changedTouches){ if (t.identifier===lookId){ e.preventDefault();
+        const dx = t.clientX - lastX; const dy = t.clientY - lastY; lastX=t.clientX; lastY=t.clientY;
+        const sensitivity = 0.004; yaw -= dx*sensitivity; pitch = Math.max(-0.5, Math.min(0.5, pitch - dy*sensitivity));
+      }}
+    }, {passive:false});
+    const endLook=(e)=>{ for (const t of e.changedTouches){ if (t.identifier===lookId){ lookId=null; } } };
+    lookpad.addEventListener('touchend', endLook);
+    lookpad.addEventListener('touchcancel', endLook);
+
+    // Jump
+    jumpBtn.addEventListener('touchstart', (e)=>{ e.preventDefault(); if (grounded) { velY = jumpSpeed; grounded=false; }}, {passive:false});
+  }
 
   // ===== Main Loop =====
   let last = performance.now();
@@ -218,13 +286,21 @@
       right.copy(forward).applyAxisAngle(new THREE.Vector3(0,1,0), Math.PI/2);
 
       let move = new THREE.Vector3();
+      // Keyboard WASD
       if (keys.has('w')) move.add(forward);
       if (keys.has('s')) move.add(forward.clone().multiplyScalar(-1));
       if (keys.has('a')) move.add(right.clone().multiplyScalar(-1));
       if (keys.has('d')) move.add(right);
+      // Touch joystick
+      if (isTouch){
+        if (Math.hypot(joyX, joyY) > 0.01){
+          move.add(forward.clone().multiplyScalar(joyY));
+          move.add(right.clone().multiplyScalar(joyX));
+        }
+      }
       if (move.lengthSq()>0){ move.normalize().multiplyScalar(speed*dt); }
 
-      // Jump
+      // Jump (keyboard)
       if (keys.has(' ') && grounded && running){
         velY = jumpSpeed;
         grounded = false;
