@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>3Dコレクトゲーム - Three.js</title>
+  <style>
+    :root { --bg:#0b1020; --fg:#e6e8ef; --accent:#7ee787; }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    #ui{position:fixed;inset:12px auto auto 12px;display:flex;gap:12px;align-items:center;z-index:10}
+    .pill{background:#121933;border:1px solid #28314f;border-radius:999px;padding:8px 14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    #hint{position:fixed;left:12px;bottom:12px;opacity:.8}
+    #center{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;color:#fff;font-weight:700;text-shadow:0 2px 8px rgba(0,0,0,.6)}
+    #win{display:none;font-size:28px}
+    #canvas{position:fixed;inset:0;display:block}
+    button{cursor:pointer}
+    #controls{position:fixed;right:12px;top:12px;display:flex;gap:8px;z-index:10}
+    #startBtn{background:#1f6feb;color:white;border:1px solid #305fa0;border-radius:10px;padding:8px 12px;font-weight:700}
+    #resetBtn{background:#2ea043;color:#091b09;border:1px solid #3fb950;border-radius:10px;padding:8px 12px;font-weight:700}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div class="pill">Score: <span id="score">0</span></div>
+    <div class="pill">Time: <span id="time">60.0</span>s</div>
+    <div class="pill">Coins left: <span id="left">10</span></div>
+  </div>
+  <div id="controls">
+    <button id="startBtn">▶ ゲーム開始（マウス操作ON）</button>
+    <button id="resetBtn">↻ リセット</button>
+  </div>
+  <div id="hint">W/A/S/D：移動、マウス：視点、スペース：ジャンプ</div>
+  <div id="center"><span id="win">🎉 CLEAR! 🎉</span></div>
+  <canvas id="canvas"></canvas>
+
+  <!-- Three.js CDN -->
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.160.0/examples/js/controls/PointerLockControls.js"></script>
+
+  <script>
+  // ===== Basic Setup =====
+  const canvas = document.getElementById('canvas');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(devicePixelRatio);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1020);
+  const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+
+  // Lighting
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x223355, 0.9);
+  scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(5,10,3);
+  scene.add(dir);
+
+  // Floor
+  const floorGeo = new THREE.PlaneGeometry(60, 60, 1, 1);
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x182341, metalness: 0.1, roughness: 0.9 });
+  const floor = new THREE.Mesh(floorGeo, floorMat);
+  floor.rotation.x = -Math.PI/2;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  // Player (a small box)
+  const playerGeo = new THREE.BoxGeometry(1, 1, 1);
+  const playerMat = new THREE.MeshStandardMaterial({ color: 0x7ee787, emissive: 0x103015 });
+  const player = new THREE.Mesh(playerGeo, playerMat);
+  player.position.set(0, 0.5, 0);
+  player.castShadow = true;
+  scene.add(player);
+
+  // Camera offset behind player (third-person)
+  const camOffset = new THREE.Vector3(0, 3, 6);
+
+  // Pointer lock controls (only for yaw via fake object)
+  const yawPivot = new THREE.Object3D();
+  scene.add(yawPivot);
+  yawPivot.add(player);
+
+  const controls = new THREE.PointerLockControls(camera, document.body);
+
+  document.getElementById('startBtn').addEventListener('click', () => {
+    controls.lock();
+  });
+  controls.addEventListener('lock', () => {
+    document.getElementById('startBtn').textContent = '視点ロック中（Escで解除）';
+  });
+  controls.addEventListener('unlock', () => {
+    document.getElementById('startBtn').textContent = '▶ ゲーム開始（マウス操作ON）';
+  });
+
+  // Keyboard state
+  const keys = new Set();
+  window.addEventListener('keydown', (e) => keys.add(e.key.toLowerCase()));
+  window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
+
+  // Physics-ish
+  const speed = 10; // move units / s
+  const jumpSpeed = 9;
+  const gravity = -20; // y units / s^2
+  let velY = 0;
+  let grounded = true;
+
+  // Coins
+  const COIN_COUNT = 10;
+  const coins = [];
+  const coinGeo = new THREE.TorusGeometry(0.35, 0.15, 8, 16);
+  const coinMat = new THREE.MeshStandardMaterial({ color: 0xffd166, emissive: 0x331a00, metalness: 0.8, roughness: 0.3 });
+
+  function randPos() {
+    const margin = 3;
+    const range = 26; // within floor size 60
+    return new THREE.Vector3((Math.random()*2-1)*range, 0.5, (Math.random()*2-1)*range);
+  }
+
+  function spawnCoins() {
+    for (const c of coins) scene.remove(c.mesh);
+    coins.length = 0;
+    for (let i=0;i<COIN_COUNT;i++){
+      const mesh = new THREE.Mesh(coinGeo, coinMat);
+      mesh.position.copy(randPos());
+      mesh.rotation.x = Math.PI/2;
+      mesh.castShadow = true;
+      scene.add(mesh);
+      coins.push({ mesh, taken:false });
+    }
+    updateLeft();
+  }
+
+  // UI
+  let score = 0;
+  let timeLeft = 60.0;
+  let running = true;
+  const scoreEl = document.getElementById('score');
+  const timeEl = document.getElementById('time');
+  const leftEl = document.getElementById('left');
+  const winEl = document.getElementById('win');
+
+  function updateLeft(){
+    leftEl.textContent = coins.filter(c=>!c.taken).length;
+  }
+
+  function resetGame(){
+    score = 0; scoreEl.textContent = score;
+    timeLeft = 60.0; timeEl.textContent = timeLeft.toFixed(1);
+    running = true; winEl.style.display = 'none';
+    player.position.set(0,0.5,0); velY = 0; grounded = true;
+    yawPivot.position.set(0,0,0); yawPivot.rotation.y = 0;
+    spawnCoins();
+  }
+  document.getElementById('resetBtn').addEventListener('click', resetGame);
+
+  // Resize
+  function onResize(){
+    renderer.setSize(innerWidth, innerHeight);
+    camera.aspect = innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+  }
+  addEventListener('resize', onResize);
+  onResize();
+
+  // ===== Main Loop =====
+  let last = performance.now();
+  resetGame();
+
+  function animate(){
+    requestAnimationFrame(animate);
+    const now = performance.now();
+    const dt = Math.min(0.033, (now - last)/1000); // clamp dt
+    last = now;
+
+    // Timer
+    if (running){
+      timeLeft -= dt;
+      if (timeLeft <= 0){ timeLeft = 0; running = false; }
+      timeEl.textContent = timeLeft.toFixed(1);
+    }
+
+    // Mouse yaw via PointerLock: rotate yawPivot based on mouse movement
+    // PointerLockControls moves camera, but we use its delta by listening to mousemove
+    // Simpler: use controls.getObject().rotation.y. We'll manually set yaw from mouse movement events.
+  }
+  animate();
+
+  // Because the built-in controls move the camera, we won't use its movement. We'll just use relative mouse movement.
+  let yaw = 0;
+  let pitch = 0; // not used for player, but for camera look slightly
+  document.body.addEventListener('mousemove', (e)=>{
+    if (!controls.isLocked) return;
+    const sensitivity = 0.0025;
+    yaw -= e.movementX * sensitivity;
+    pitch -= e.movementY * sensitivity;
+    pitch = Math.max(-0.5, Math.min(0.5, pitch));
+  });
+
+  // Replace animate with full logic including movement, camera, coin checks
+  (function(){
+    const forward = new THREE.Vector3();
+    const right = new THREE.Vector3();
+
+    function gameLoop(){
+      requestAnimationFrame(gameLoop);
+      const now = performance.now();
+      const dt = Math.min(0.033, (now - last)/1000);
+      last = now;
+
+      if (running){
+        timeLeft -= dt;
+        if (timeLeft <= 0){ timeLeft = 0; running = false; }
+        timeEl.textContent = timeLeft.toFixed(1);
+      }
+
+      // Update orientation
+      yawPivot.rotation.y = yaw;
+
+      // Movement
+      forward.set(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+      right.copy(forward).applyAxisAngle(new THREE.Vector3(0,1,0), Math.PI/2);
+
+      let move = new THREE.Vector3();
+      if (keys.has('w')) move.add(forward);
+      if (keys.has('s')) move.add(forward.clone().multiplyScalar(-1));
+      if (keys.has('a')) move.add(right.clone().multiplyScalar(-1));
+      if (keys.has('d')) move.add(right);
+      if (move.lengthSq()>0){ move.normalize().multiplyScalar(speed*dt); }
+
+      // Jump
+      if (keys.has(' ') && grounded && running){
+        velY = jumpSpeed;
+        grounded = false;
+      }
+      // Gravity
+      velY += gravity * dt;
+
+      // Apply
+      player.position.add(move);
+      player.position.y += velY * dt;
+
+      // Ground collision
+      if (player.position.y <= 0.5){
+        player.position.y = 0.5;
+        velY = 0;
+        grounded = true;
+      }
+
+      // Keep within bounds
+      player.position.x = Math.max(-29, Math.min(29, player.position.x));
+      player.position.z = Math.max(-29, Math.min(29, player.position.z));
+
+      // Camera follow (third-person)
+      const camTarget = player.position.clone().add(new THREE.Vector3(0, 0.5, 0));
+      const offset = new THREE.Vector3(0, 2.5, 6).applyAxisAngle(new THREE.Vector3(0,1,0), yaw);
+      const desired = camTarget.clone().add(offset);
+      camera.position.lerp(desired, 1 - Math.pow(0.001, dt*60)); // smooth follow
+      camera.lookAt(camTarget.x, camTarget.y + pitch*2, camTarget.z);
+
+      // Rotate coins & check collect
+      let remaining = 0;
+      for (const c of coins){
+        if (c.taken) continue;
+        c.mesh.rotation.z += dt*3;
+        const dist = c.mesh.position.distanceTo(player.position);
+        if (running && dist < 0.8){
+          c.taken = true;
+          scene.remove(c.mesh);
+          score += 10; scoreEl.textContent = score;
+        } else {
+          remaining++;
+        }
+      }
+      leftEl.textContent = remaining;
+
+      if (running && remaining === 0){
+        running = false; winEl.style.display = 'block';
+      }
+
+      renderer.render(scene, camera);
+    }
+    gameLoop();
+  })();
+
+  </script>
+</body>
+</html>
